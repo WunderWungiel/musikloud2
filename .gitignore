@@ -1,0 +1,25 @@
+# Qt Creator
+*.pro.user*
+
+# qmake / Symbian (sbsv2) generated files (in-source build, see build_symbian.bat)
+Makefile*
+bld.inf
+*.mmp
+*.pkg
+*.loc
+*.rss
+*.sis
+*.sisx
+*.mif
+.make.cache
+moc_*.cpp
+qrc_*.cpp
+ui_*.h
+*.o
+*.obj
+.qmake.stash
+
+# Build dirs
+debug/
+release/
+*-build-*/

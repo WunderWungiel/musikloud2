@@ -298,7 +298,12 @@ maemo5 {
     
     MMP_RULES += "DEBUGGABLE_UDEBONLY"
 
-    LIBS += -lqsoundcloud
+    # qsoundcloud: static library built from the external/qsoundcloud
+    # submodule by external/qsoundcloud_lib (build musikloud2.pro, not app.pro)
+    DEFINES += QSOUNDCLOUD_STATIC_LIBRARY
+    INCLUDEPATH += ../external/include
+    LIBS += -lqsoundcloud.lib
+
     LIBS += -L\\epoc32\\release\\armv5\\lib -lremconcoreapi
     LIBS += -L\\epoc32\\release\\armv5\\lib -lremconinterfacebase
     
