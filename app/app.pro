@@ -295,7 +295,7 @@ maemo5 {
     TARGET.EPOCHEAPSIZE = 0x20000 0x8000000
     TARGET.EPOCSTACKSIZE = 0x14000
     
-    VERSION = 0.2.0
+    VERSION = 0.3.0
     ICON = desktop/symbian/musikloud2.svg
     
     MMP_RULES += "DEBUGGABLE_UDEBONLY"
@@ -459,7 +459,7 @@ maemo5 {
     
     images.path = !:/Private/e77abf1c/qml/images
     
-    vendorinfo += "%{\"Stuart Howarth\"}" ":\"Stuart Howarth\""
+    vendorinfo += "%{\"Wunder Wungiel\"}" ":\"Wunder Wungiel\""
     qtcomponentsdep = "; Default dependency to Qt Quick Components for Symbian library" \
         "(0x200346DE), 1, 1, 0, {\"Qt Quick components for Symbian\"}"
 
