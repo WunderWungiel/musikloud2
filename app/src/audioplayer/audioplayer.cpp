@@ -16,6 +16,7 @@
 
 #include "audioplayer.h"
 #include "definitions.h"
+#include "hlsproxy.h"
 #include "logger.h"
 #include "plugintrack.h"
 #include "resources.h"
@@ -1141,9 +1142,12 @@ void AudioPlayer::onSoundCloudModelStatusChanged(QSoundCloud::StreamsRequest::St
         setStatus(Loaded);
         
         if (m_soundcloudModel->rowCount() > 0) {
-            m_player->setMedia(QUrl(m_soundcloudModel->data(qMax(0, m_soundcloudModel->match("name",
-                               Settings::defaultPlaybackFormat(Resources::SOUNDCLOUD))), "value")
-                               .toMap().value("url").toString()));
+            const QUrl url = HlsProxy::streamUrl(m_soundcloudModel->data(qMax(0, m_soundcloudModel->match("name",
+                                                  Settings::defaultPlaybackFormat(Resources::SOUNDCLOUD))), "value")
+                                                  .toMap());
+            Logger::log("AudioPlayer::onSoundCloudModelStatusChanged(). Playing " + url.toString(),
+                        Logger::MediumVerbosity);
+            m_player->setMedia(url);
             
             if (!isPaused()) {
                 m_player->play();

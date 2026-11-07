@@ -15,6 +15,7 @@ HEADERS += \
     src/base/categorymodel.h \
     src/base/categorynamemodel.h \
     src/base/clipboard.h \
+    src/base/hlsproxy.h \
     src/base/comment.h \
     src/base/concurrenttransfersmodel.h \
     src/base/json.h \
@@ -77,6 +78,7 @@ SOURCES += \
     src/base/artist.cpp \
     src/base/categorymodel.cpp \
     src/base/clipboard.cpp \
+    src/base/hlsproxy.cpp \
     src/base/comment.cpp \
     src/base/json.cpp \
     src/base/playlist.cpp \

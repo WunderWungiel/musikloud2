@@ -17,6 +17,7 @@
 #include "soundcloudtransfer.h"
 #include "logger.h"
 #include "soundcloud.h"
+#include "hlsproxy.h"
 #include <qsoundcloud/streamsrequest.h>
 #include <QFileInfo>
 
@@ -65,7 +66,7 @@ void SoundCloudTransfer::onStreamsRequestFinished() {
                     }
                 }
                 
-                startDownload(stream.value("url").toString());
+                startDownload(HlsProxy::streamUrl(stream, true));
                 return;
             }
         }
