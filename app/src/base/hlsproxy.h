@@ -34,6 +34,9 @@ class QTcpSocket;
  * Playback URLs are served without a length (like an internet radio stream). Download URLs use chunked transfer
  * encoding, so that a failure partway through is reported as an error rather than as a complete, truncated file.
  * A "Range: bytes=N-" request header is honoured, so that downloads can be resumed.
+ *
+ * A "start=<ms>" query item starts the stream at that position, which is how a player seeks in a stream: it requests
+ * a new URL (see seekUrl()) and adds the start position to the position reported by its media player.
  */
 class HlsProxy : public QObject
 {
@@ -51,12 +54,26 @@ public:
     // Returns a local URL that serves the HLS media playlist at playlistUrl as one MP3 stream.
     QUrl proxyUrl(const QUrl &playlistUrl, bool download = false);
 
+    // Returns the id of the stream served at url, or 0 if url is not a proxy URL.
+    static int streamId(const QUrl &url);
+    // Returns a URL that serves the same stream as url, starting at position (in milliseconds).
+    static QUrl seekUrl(const QUrl &url, qint64 position);
+
     QNetworkAccessManager* networkAccessManager();
 
     bool hasStream(int id) const;
     QUrl playlistUrl(int id) const;
     QList<QUrl> segments(int id) const;
-    void setSegments(int id, const QList<QUrl> &segments);
+    // The duration of each segment in milliseconds. Empty if the playlist does not give them all.
+    QList<qint64> segmentDurations(int id) const;
+    void setSegments(int id, const QList<QUrl> &segments, const QList<qint64> &durations);
+
+    // The duration of the stream in milliseconds, or 0 if it is not known yet. It is known once the stream's
+    // playlist has been loaded, when durationChanged() is emitted.
+    qint64 duration(int id) const;
+
+Q_SIGNALS:
+    void durationChanged(int id, qint64 duration);
 
 private Q_SLOTS:
     void onNewConnection();
@@ -69,6 +86,7 @@ private:
     struct Stream {
         QUrl playlistUrl;
         QList<QUrl> segments;
+        QList<qint64> durations;
     };
 
     static HlsProxy *self;
@@ -100,6 +118,7 @@ private:
     void getPlaylist(const QUrl &url);
     void startStream();
     void getNextSegment();
+    static int findMp3Frame(const QByteArray &data);
     void writeData(const QByteArray &data);
     void sendError(const QByteArray &status);
     void close();
@@ -117,10 +136,13 @@ private:
 
     int m_id;
     QList<QUrl> m_segments;
+    QList<qint64> m_durations;
     int m_index;
     int m_retries;
     int m_playlistRedirects;
     qint64 m_skip;
+    qint64 m_start;
+    qint64 m_startOffset;
 };
 
 #endif // HLSPROXY_H

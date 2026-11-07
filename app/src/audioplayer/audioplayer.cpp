@@ -127,7 +127,10 @@ AudioPlayer::AudioPlayer(QObject *parent) :
     m_sleepTimerRemaining(0),
     m_stopAfterCurrentTrack(false),
     m_status(Stopped),
-    m_metaDataSet(false)
+    m_metaDataSet(false),
+    m_hlsStream(0),
+    m_hlsOffset(0),
+    m_hlsPlayPending(false)
 {
     m_sleepTimer.setInterval(60000);
     
@@ -137,13 +140,14 @@ AudioPlayer::AudioPlayer(QObject *parent) :
     connect(m_player, SIGNAL(metaDataChanged()), this, SLOT(onMetaDataChanged()));
     connect(m_player, SIGNAL(mediaStatusChanged(QMediaPlayer::MediaStatus)),
             this, SLOT(onMediaStatusChanged(QMediaPlayer::MediaStatus)));
-    connect(m_player, SIGNAL(positionChanged(qint64)), this, SIGNAL(positionChanged(qint64)));
+    connect(m_player, SIGNAL(positionChanged(qint64)), this, SLOT(onPositionChanged()));
     connect(m_player, SIGNAL(seekableChanged(bool)), this, SLOT(onSeekableChanged()));
     connect(m_player, SIGNAL(stateChanged(QMediaPlayer::State)), this, SLOT(onStateChanged(QMediaPlayer::State)));
     connect(m_player, SIGNAL(volumeChanged(int)), this, SIGNAL(volumeChanged(int)));
     connect(this, SIGNAL(currentIndexChanged(int)), m_queue, SLOT(onCurrentIndexChanged()));
     connect(m_queue, SIGNAL(countChanged(int)), this, SIGNAL(queueCountChanged(int)));
     connect(&m_sleepTimer, SIGNAL(timeout()), this, SLOT(onSleepTimerTimeout()));
+    connect(HlsProxy::instance(), SIGNAL(durationChanged(int, qint64)), this, SLOT(onHlsDurationChanged(int)));
 }
 
 AudioPlayer::~AudioPlayer() {
@@ -240,6 +244,18 @@ MKTrack* AudioPlayer::currentTrack() const {
 }
 
 qint64 AudioPlayer::duration() const {
+    if (m_hlsStream > 0) {
+        // The proxied stream has no length, so the media player does not know its duration.
+        const qint64 d = HlsProxy::instance()->duration(m_hlsStream);
+
+        if (d > 0) {
+            return d;
+        }
+
+        const MKTrack *track = currentTrack();
+        return track ? track->duration() : 0;
+    }
+
     return m_player->duration();
 }
 
@@ -306,10 +322,37 @@ bool AudioPlayer::isStopped() const {
 }
 
 qint64 AudioPlayer::position() const {
-    return m_player->position();
+    return m_hlsOffset + m_player->position();
 }
 
 void AudioPlayer::setPosition(qint64 p) {
+    if (m_hlsStream > 0) {
+        // Request the stream again from the new position.
+        const qint64 d = duration();
+
+        if (d > 0) {
+            p = qBound(qint64(0), p, d);
+        }
+
+        // Playback always resumes after the seek: if the new media were left stopped, play() would request the
+        // track's streams again and start from the beginning.
+        Logger::log("AudioPlayer::setPosition(). Seeking HLS stream to " + QString::number(p),
+                    Logger::MediumVerbosity);
+        m_hlsOffset = qMax(qint64(0), p);
+        m_player->setMedia(HlsProxy::seekUrl(m_hlsUrl, m_hlsOffset));
+        m_player->play();
+        Logger::log(QString("AudioPlayer::setPosition(). After play(): state %1, media status %2")
+                    .arg(m_player->state()).arg(m_player->mediaStatus()), Logger::HighVerbosity);
+
+        if (m_player->state() != QMediaPlayer::PlayingState) {
+            restartPlayback();
+        }
+
+        m_hlsPlayPending = true;
+        emit positionChanged(position());
+        return;
+    }
+
     m_player->setPosition(p);
 }
 
@@ -326,6 +369,10 @@ int AudioPlayer::queueCount() const {
 }
 
 bool AudioPlayer::isSeekable() const {
+    if (m_hlsStream > 0) {
+        return duration() > 0;
+    }
+
     return (m_player->isSeekable()) && (m_player->duration() > 0);
 }
 
@@ -424,6 +471,37 @@ void AudioPlayer::setStatus(AudioPlayer::Status s) {
         m_status = s;
         emit statusChanged(s);
     }
+}
+
+void AudioPlayer::setMedia(const QUrl &url) {
+    m_hlsStream = HlsProxy::streamId(url);
+    m_hlsUrl = (m_hlsStream > 0) ? url : QUrl();
+    m_hlsOffset = 0;
+    m_hlsPlayPending = false;
+    m_player->setMedia(url);
+
+    if (m_hlsStream > 0) {
+        emit durationChanged(duration());
+        emit seekableChanged(isSeekable());
+    }
+}
+
+// After setMedia() during playback, Symbian sometimes ignores play() and keeps ignoring it, while reporting the
+// stopped state, until pause() is called.
+void AudioPlayer::restartPlayback() {
+    Logger::log(QString("AudioPlayer::restartPlayback(). play() was ignored (media status %1). Calling pause() and "
+                        "play()").arg(m_player->mediaStatus()), Logger::MediumVerbosity);
+    m_player->pause();
+    m_player->play();
+    Logger::log(QString("AudioPlayer::restartPlayback(). State %1").arg(m_player->state()), Logger::MediumVerbosity);
+}
+
+void AudioPlayer::clearMedia() {
+    m_hlsStream = 0;
+    m_hlsUrl = QUrl();
+    m_hlsOffset = 0;
+    m_hlsPlayPending = false;
+    m_player->setMedia(QMediaContent());
 }
 
 int AudioPlayer::volume() const {
@@ -749,6 +827,7 @@ void AudioPlayer::next(bool autoPlay) {
 }
 
 void AudioPlayer::pause() {
+    m_hlsPlayPending = false;
     m_player->pause();
 }
 
@@ -760,7 +839,7 @@ void AudioPlayer::play() {
     if (isStopped()) {
         if (const MKTrack *track = currentTrack()) {
             if (!track->streamUrl().isEmpty()) {
-                m_player->setMedia(track->streamUrl());
+                setMedia(track->streamUrl());
                 m_player->play();
             }
             else if (track->service() == Resources::SOUNDCLOUD) {
@@ -835,7 +914,7 @@ void AudioPlayer::previous(bool autoPlay) {
 
 void AudioPlayer::stop() {
     m_player->stop();
-    m_player->setMedia(QMediaContent());
+    clearMedia();
     emit durationChanged(0);
     emit seekableChanged(false);
     
@@ -877,6 +956,8 @@ void AudioPlayer::initSoundCloudModel() {
 }
 
 void AudioPlayer::onBufferStatusChanged(int b) {
+    Logger::log(QString("AudioPlayer::onBufferStatusChanged(). %1. State %2, media status %3").arg(b)
+                .arg(m_player->state()).arg(m_player->mediaStatus()), Logger::HighVerbosity);
     // Workaround as QMediaPlayer does not notify when mediaStatus changes to QMediaPlayer::BufferingMedia
     if (b < 100) {
         setStatus(Buffering);
@@ -886,6 +967,11 @@ void AudioPlayer::onBufferStatusChanged(int b) {
 }
 
 void AudioPlayer::onDurationChanged(qint64 d) {
+    if (m_hlsStream > 0) {
+        // The media player's duration of a proxied stream is meaningless. See duration().
+        return;
+    }
+
     if (d > 0) {
         if (MKTrack *track = currentTrack()) {
             track->setDuration(d);
@@ -898,6 +984,8 @@ void AudioPlayer::onDurationChanged(qint64 d) {
 }
 
 void AudioPlayer::onError(QMediaPlayer::Error e) {
+    Logger::log(QString("AudioPlayer::onError(). %1: %2").arg(e).arg(m_player->errorString()),
+                Logger::MediumVerbosity);
     // Symbian throws an error when setting empty media, so ignore the error in this case
     if ((e != QMediaPlayer::NoError) && (!m_player->media().isNull())) {
         setErrorString(m_player->errorString());
@@ -905,7 +993,40 @@ void AudioPlayer::onError(QMediaPlayer::Error e) {
     }
 }
 
+void AudioPlayer::onHlsDurationChanged(int id) {
+    if ((id <= 0) || (id != m_hlsStream)) {
+        return;
+    }
+
+    const qint64 d = duration();
+
+    if (d > 0) {
+        if (MKTrack *track = currentTrack()) {
+            track->setDuration(d);
+        }
+    }
+
+    emit durationChanged(d);
+    emit seekableChanged(isSeekable());
+    emit metaDataChanged();
+}
+
+void AudioPlayer::onPositionChanged() {
+    emit positionChanged(position());
+}
+
 void AudioPlayer::onMediaStatusChanged(QMediaPlayer::MediaStatus m) {
+    Logger::log(QString("AudioPlayer::onMediaStatusChanged(). %1. State %2, position %3").arg(m)
+                .arg(m_player->state()).arg(m_player->position()), Logger::HighVerbosity);
+
+    if ((m_hlsPlayPending) && ((m == QMediaPlayer::LoadedMedia) || (m == QMediaPlayer::BufferedMedia))) {
+        m_hlsPlayPending = false;
+
+        if (m_player->state() != QMediaPlayer::PlayingState) {
+            restartPlayback();
+        }
+    }
+
     switch (m) {
     case QMediaPlayer::UnknownMediaStatus:
     case QMediaPlayer::NoMedia:
@@ -924,7 +1045,13 @@ void AudioPlayer::onMediaStatusChanged(QMediaPlayer::MediaStatus m) {
     case QMediaPlayer::EndOfMedia:
         if (!stopAfterCurrentTrack()) {
             if (repeatEnabled()) {
-                play();
+                if (m_hlsStream > 0) {
+                    // Replaying the current URL would start at the last seek position.
+                    setPosition(0);
+                }
+                else {
+                    play();
+                }
             }
             else {
                 next(true);
@@ -1096,9 +1223,9 @@ void AudioPlayer::onPluginModelStatusChanged(ResourcesRequest::Status s) {
         setStatus(Loaded);
         
         if (m_pluginModel->rowCount() > 0) {
-            m_player->setMedia(QUrl(m_pluginModel->data(qMax(0, m_pluginModel->match("name",
-                               Settings::defaultPlaybackFormat(m_pluginModel->service()))), "value")
-                               .toMap().value("url").toString()));
+            setMedia(QUrl(m_pluginModel->data(qMax(0, m_pluginModel->match("name",
+                     Settings::defaultPlaybackFormat(m_pluginModel->service()))), "value")
+                     .toMap().value("url").toString()));
            
            if (!isPaused()) {
                 m_player->play();
@@ -1147,8 +1274,8 @@ void AudioPlayer::onSoundCloudModelStatusChanged(QSoundCloud::StreamsRequest::St
                                                   .toMap());
             Logger::log("AudioPlayer::onSoundCloudModelStatusChanged(). Playing " + url.toString(),
                         Logger::MediumVerbosity);
-            m_player->setMedia(url);
-            
+            setMedia(url);
+
             if (!isPaused()) {
                 m_player->play();
             }
@@ -1170,6 +1297,8 @@ void AudioPlayer::onSoundCloudModelStatusChanged(QSoundCloud::StreamsRequest::St
 }
 
 void AudioPlayer::onStateChanged(QMediaPlayer::State s) {
+    Logger::log(QString("AudioPlayer::onStateChanged(). %1. Media status %2, position %3").arg(s)
+                .arg(m_player->mediaStatus()).arg(m_player->position()), Logger::HighVerbosity);
     switch (s) {
     case QMediaPlayer::StoppedState:
         setStatus(Stopped);

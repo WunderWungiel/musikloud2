@@ -107,6 +107,33 @@ QUrl HlsProxy::proxyUrl(const QUrl &playlistUrl, bool download) {
     return url;
 }
 
+int HlsProxy::streamId(const QUrl &url) {
+    if ((!self) || (!self->m_server->isListening()) || (url.host() != "127.0.0.1")
+        || (url.port() != self->m_server->serverPort())) {
+        return 0;
+    }
+
+    QString name = url.path().mid(1);
+
+    if (!name.endsWith(".mp3")) {
+        return 0;
+    }
+
+    name.chop(4);
+    return qMax(0, name.toInt());
+}
+
+QUrl HlsProxy::seekUrl(const QUrl &url, qint64 position) {
+    QUrl u(url);
+    u.removeAllQueryItems("start");
+
+    if (position > 0) {
+        u.addQueryItem("start", QString::number(position));
+    }
+
+    return u;
+}
+
 QNetworkAccessManager* HlsProxy::networkAccessManager() {
     return m_nam;
 }
@@ -123,10 +150,27 @@ QList<QUrl> HlsProxy::segments(int id) const {
     return m_streams.value(id).segments;
 }
 
-void HlsProxy::setSegments(int id, const QList<QUrl> &segments) {
+QList<qint64> HlsProxy::segmentDurations(int id) const {
+    return m_streams.value(id).durations;
+}
+
+void HlsProxy::setSegments(int id, const QList<QUrl> &segments, const QList<qint64> &durations) {
     if (m_streams.contains(id)) {
         m_streams[id].segments = segments;
+        m_streams[id].durations = durations;
+        emit durationChanged(id, duration(id));
     }
+}
+
+qint64 HlsProxy::duration(int id) const {
+    const QList<qint64> durations = m_streams.value(id).durations;
+    qint64 total = 0;
+
+    for (int i = 0; i < durations.size(); i++) {
+        total += durations.at(i);
+    }
+
+    return total;
 }
 
 void HlsProxy::onNewConnection() {
@@ -149,7 +193,9 @@ HlsProxyConnection::HlsProxyConnection(QTcpSocket *socket, HlsProxy *proxy) :
     m_index(0),
     m_retries(0),
     m_playlistRedirects(0),
-    m_skip(0)
+    m_skip(0),
+    m_start(0),
+    m_startOffset(0)
 {
     socket->setParent(this);
     connect(socket, SIGNAL(readyRead()), this, SLOT(onSocketReadyRead()));
@@ -201,6 +247,7 @@ void HlsProxyConnection::handleRequest() {
     name.chop(4); // ".mp3"
     m_id = name.toInt();
     m_chunked = (path.queryItemValue("download") == "1");
+    m_start = qMax(qint64(0), path.queryItemValue("start").toLongLong());
 
     for (int i = 1; i < lines.size(); i++) {
         const QByteArray line = lines.at(i).trimmed();
@@ -216,8 +263,8 @@ void HlsProxyConnection::handleRequest() {
         }
     }
 
-    Logger::log(QString("HlsProxyConnection::handleRequest(). %1 stream %2, offset %3")
-                .arg(QString::fromUtf8(method)).arg(m_id).arg(m_skip), Logger::MediumVerbosity);
+    Logger::log(QString("HlsProxyConnection::handleRequest(). %1 stream %2, offset %3, start %4 ms")
+                .arg(QString::fromUtf8(method)).arg(m_id).arg(m_skip).arg(m_start), Logger::MediumVerbosity);
 
     if ((m_id <= 0) || (!m_proxy->hasStream(m_id))) {
         m_id = -1;
@@ -226,6 +273,7 @@ void HlsProxyConnection::handleRequest() {
     }
 
     m_segments = m_proxy->segments(m_id);
+    m_durations = m_proxy->segmentDurations(m_id);
 
     if (m_segments.isEmpty()) {
         getPlaylist(m_proxy->playlistUrl(m_id));
@@ -265,6 +313,8 @@ void HlsProxyConnection::onPlaylistFinished() {
 
     const QStringList lines = QString::fromUtf8(reply->readAll()).split('\n');
     QList<QUrl> segments;
+    QList<qint64> durations;
+    qint64 segmentDuration = 0;
     QUrl variant;
 
     for (int i = 0; i < lines.size(); i++) {
@@ -279,6 +329,11 @@ void HlsProxyConnection::onPlaylistFinished() {
                 Logger::log("HlsProxyConnection::onPlaylistFinished(). Error: Encrypted streams are not supported");
                 sendError("502 Bad Gateway");
                 return;
+            }
+
+            if (line.startsWith("#EXTINF:")) {
+                // "#EXTINF:<duration in seconds>,[<title>]"
+                segmentDuration = qRound64(line.mid(8).section(',', 0, 0).trimmed().toDouble() * 1000);
             }
 
             if ((line.startsWith("#EXT-X-STREAM-INF")) && (variant.isEmpty())) {
@@ -297,6 +352,13 @@ void HlsProxyConnection::onPlaylistFinished() {
         }
 
         segments << reply->url().resolved(QUrl::fromEncoded(line.toUtf8()));
+        durations << segmentDuration;
+        segmentDuration = 0;
+    }
+
+    // Seeking needs the duration of every segment.
+    if (durations.contains(0)) {
+        durations.clear();
     }
 
     if ((!variant.isEmpty()) && (m_playlistRedirects < MAX_PLAYLIST_REDIRECTS)) {
@@ -311,10 +373,11 @@ void HlsProxyConnection::onPlaylistFinished() {
         return;
     }
 
-    Logger::log(QString("HlsProxyConnection::onPlaylistFinished(). Stream %1 has %2 segments").arg(m_id)
-                .arg(segments.size()), Logger::MediumVerbosity);
     m_segments = segments;
-    m_proxy->setSegments(m_id, segments);
+    m_durations = durations;
+    m_proxy->setSegments(m_id, segments, durations);
+    Logger::log(QString("HlsProxyConnection::onPlaylistFinished(). Stream %1 has %2 segments, %3 ms").arg(m_id)
+                .arg(segments.size()).arg(m_proxy->duration(m_id)), Logger::MediumVerbosity);
     startStream();
 }
 
@@ -342,6 +405,20 @@ void HlsProxyConnection::startStream() {
     }
 
     m_index = 0;
+    m_startOffset = 0;
+
+    if ((m_start > 0) && (m_durations.size() == m_segments.size())) {
+        // Start at the segment that contains m_start. The rest of the offset is skipped in onSegmentFinished().
+        qint64 offset = m_start;
+
+        while ((m_index < m_segments.size()) && (offset >= m_durations.at(m_index))) {
+            offset -= m_durations.at(m_index);
+            m_index++;
+        }
+
+        m_startOffset = offset;
+    }
+
     getNextSegment();
 }
 
@@ -408,9 +485,69 @@ void HlsProxyConnection::onSegmentFinished() {
         m_skip -= skip;
     }
 
+    if (m_startOffset > 0) {
+        // Skip the part of the first segment before the start position, assuming a constant bitrate within the
+        // segment, then start at an MP3 frame header so that the player does not get a partial frame.
+        const qint64 duration = m_durations.at(m_index);
+        data = data.mid(int(qint64(data.size()) * qMin(m_startOffset, duration) / duration));
+        data = data.mid(findMp3Frame(data));
+        m_startOffset = 0;
+    }
+
     writeData(data);
+    Logger::log(QString("HlsProxyConnection::onSegmentFinished(). Stream %1, segment %2: wrote %3 bytes, %4 waiting")
+                .arg(m_id).arg(m_index).arg(data.size()).arg(m_socket->bytesToWrite()), Logger::HighVerbosity);
     m_index++;
     getNextSegment();
+}
+
+// Returns the length of the MPEG audio layer III frame whose header is at h, or 0 if h is not a valid header.
+static int mp3FrameLength(const uchar *h) {
+    static const int bitrates[2][15] = {
+        { 0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320 }, // MPEG 1
+        { 0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160 }      // MPEG 2 and 2.5
+    };
+    static const int sampleRates[3] = { 44100, 48000, 32000 };
+
+    if ((h[0] != 0xFF) || ((h[1] & 0xE0) != 0xE0)) {
+        return 0;
+    }
+
+    const int version = (h[1] >> 3) & 3; // 0: MPEG 2.5, 1: reserved, 2: MPEG 2, 3: MPEG 1
+    const int layer = (h[1] >> 1) & 3;   // 1: layer III
+    const int bitrateIndex = (h[2] >> 4) & 15;
+    const int sampleRateIndex = (h[2] >> 2) & 3;
+
+    if ((version == 1) || (layer != 1) || (bitrateIndex == 0) || (bitrateIndex == 15) || (sampleRateIndex == 3)) {
+        return 0;
+    }
+
+    const bool mpeg1 = (version == 3);
+    const int bitrate = bitrates[mpeg1 ? 0 : 1][bitrateIndex] * 1000;
+    const int sampleRate = sampleRates[sampleRateIndex] >> (mpeg1 ? 0 : (version == 2) ? 1 : 2);
+    const int padding = (h[2] >> 1) & 1;
+    return (mpeg1 ? 144 : 72) * bitrate / sampleRate + padding;
+}
+
+// Returns the index of the first frame header in data that is followed by another frame header (or by the end of
+// data), or 0 if there is none.
+int HlsProxyConnection::findMp3Frame(const QByteArray &data) {
+    const uchar *d = reinterpret_cast<const uchar*>(data.constData());
+    const int size = data.size();
+
+    for (int i = 0; i + 4 <= size; i++) {
+        const int length = mp3FrameLength(d + i);
+
+        if (length > 0) {
+            const int next = i + length;
+
+            if ((next + 4 > size) || (mp3FrameLength(d + next) > 0)) {
+                return i;
+            }
+        }
+    }
+
+    return 0;
 }
 
 void HlsProxyConnection::writeData(const QByteArray &data) {

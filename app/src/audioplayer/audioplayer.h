@@ -255,8 +255,10 @@ private Q_SLOTS:
     void onBufferStatusChanged(int b);
     void onDurationChanged(qint64 d);
     void onError(QMediaPlayer::Error e);
+    void onHlsDurationChanged(int id);
     void onMediaStatusChanged(QMediaPlayer::MediaStatus m);
     void onMetaDataChanged();
+    void onPositionChanged();
     void onPluginModelStatusChanged(ResourcesRequest::Status s);
     void onSeekableChanged();
     void onSleepTimerTimeout();
@@ -300,7 +302,11 @@ private:
     void setSleepTimerRemaining(int r);
     
     void setStatus(Status s);
-    
+
+    void setMedia(const QUrl &url);
+    void clearMedia();
+    void restartPlayback();
+
     void addLocalFile(const QString &fileName);
     
     MKTrack* trackFromUrl(const QUrl &url);
@@ -336,6 +342,15 @@ private:
     Status m_status;
     
     bool m_metaDataSet;
+
+    // An HLS stream played through HlsProxy is seeked by requesting the stream from a new position, so the media
+    // player's position is relative to m_hlsOffset.
+    int m_hlsStream;
+    QUrl m_hlsUrl;
+    qint64 m_hlsOffset;
+    // Symbian sometimes ignores play() called right after setMedia(), so after a seek, playback is restarted once
+    // the new media has loaded if the player is not playing by then. See restartPlayback().
+    bool m_hlsPlayPending;
 };
 
 #endif // AUDIOPLAYER_H
