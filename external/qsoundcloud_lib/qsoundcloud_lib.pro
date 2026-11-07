@@ -25,6 +25,7 @@ INCLUDEPATH += $$SRC
 
 HEADERS += \
     $$SRC/authenticationrequest.h \
+    $$SRC/clientcredentials_p.h \
     $$SRC/json.h \
     $$SRC/model.h \
     $$SRC/model_p.h \
@@ -39,6 +40,7 @@ HEADERS += \
 
 SOURCES += \
     $$SRC/authenticationrequest.cpp \
+    $$SRC/clientcredentials.cpp \
     $$SRC/model.cpp \
     $$SRC/request.cpp \
     $$SRC/resourcesmodel.cpp \
